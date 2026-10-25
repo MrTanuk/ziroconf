@@ -23,19 +23,20 @@ pub const Header = struct {
         std.mem.writeInt(u16, buffer_header[0..2], h.id, .big);
 
         var flags: u16 = 0;
-        const bit_pos = [7]u4{ 10, 9, 8, 7, 6, 5, 4 };
 
         const arr_flags = [7]u1{ h.aa, h.tc, h.rd, h.ra, h.z, h.ad, h.cd };
+        const bit_pos = [7]u4{ 10, 9, 8, 7, 6, 5, 4 };
 
         flags |= @as(u16, @intCast(h.qr)) << 15;
         flags |= @as(u16, @intCast(h.opcode)) << 11;
+
         for (arr_flags, bit_pos) |flag, pos| {
             flags |= @as(u16, @intCast(flag)) << pos;
         }
+
         flags |= @as(u16, @intCast(h.rcode)) << 0;
 
         std.mem.writeInt(u16, buffer_header[2..4], flags, .big);
-
         std.mem.writeInt(u16, buffer_header[4..6], h.qdcount, .big);
         std.mem.writeInt(u16, buffer_header[6..8], h.ancount, .big);
         std.mem.writeInt(u16, buffer_header[8..10], h.nscount, .big);
@@ -44,20 +45,45 @@ pub const Header = struct {
         return 12;
     }
 
-    /// Print bits of six fields of header section
-    pub fn dumpHeader(buffer: *[12]u8) void {
-        std.debug.print("Id:\t\t{b:0>8}", .{buffer[0]});
-        std.debug.print("{b:0>8}\n", .{buffer[1]});
+    pub fn decodeHeader(buffer: *const [12]u8) Header {
+        const id = std.mem.readInt(u16, buffer[0..2], .big);
 
         const flags = std.mem.readInt(u16, buffer[2..4], .big);
-        std.debug.print("Flags:\t\t{b:0>16}\n", .{flags});
 
-        const counts = [4][]const u8{ "qdcount", "ancount", "nscount", "arcount" };
-        for (counts, 0..) |name, i| {
-            const off = 4 + i * 2;
-            const val = std.mem.readInt(u16, buffer[off..][0..2], .big);
-            std.debug.print("{s}:\t{b:0>16}\n", .{ name, val });
+        const qr = @as(u1, @intCast(flags >> 15));
+        const opcode = @as(u4, @intCast((flags >> 11) & 0x0F));
+
+        const bit_pos = [7]u4{ 10, 9, 8, 7, 6, 5, 4 };
+        var arr_flags: [7]u1 = undefined;
+
+        for (&arr_flags, bit_pos) |*flag, pos| {
+            flag.* = @as(u1, @intCast((flags >> pos) & 0x01));
         }
+
+        const rcode = @as(u4, @intCast(flags & 0x0F));
+
+        const qdcount = std.mem.readInt(u16, buffer[4..6], .big);
+        const ancount = std.mem.readInt(u16, buffer[6..8], .big);
+        const nscount = std.mem.readInt(u16, buffer[8..10], .big);
+        const arcount = std.mem.readInt(u16, buffer[10..12], .big);
+
+        return .{
+            .id = id,
+            .qr = qr,
+            .opcode = opcode,
+            .aa = arr_flags[0],
+            .tc = arr_flags[1],
+            .rd = arr_flags[2],
+            .ra = arr_flags[3],
+            .z = arr_flags[4],
+            .ad = arr_flags[5],
+            .cd = arr_flags[6],
+            .rcode = rcode,
+            .qdcount = qdcount,
+            .ancount = ancount,
+            .nscount = nscount,
+            .arcount = arcount,
+        };
     }
 };
 
@@ -122,6 +148,22 @@ pub fn decodeServiceInstanceName(in: []const u8, out: []u8) !usize {
 
         d_pos += label_len;
         s_pos += 1 + label_len;
+    }
+}
+
+/// Print bits of six fields of header section
+pub fn dumpHeader(buffer: *const [12]u8) void {
+    std.debug.print("Id:\t\t{b:0>8}", .{buffer[0]});
+    std.debug.print("{b:0>8}\n", .{buffer[1]});
+
+    const flags = std.mem.readInt(u16, buffer[2..4], .big);
+    std.debug.print("Flags:\t\t{b:0>16}\n", .{flags});
+
+    const counts = [4][]const u8{ "qdcount", "ancount", "nscount", "arcount" };
+    for (counts, 0..) |name, i| {
+        const off = 4 + i * 2;
+        const val = std.mem.readInt(u16, buffer[off..][0..2], .big);
+        std.debug.print("{s}:\t{b:0>16}\n", .{ name, val });
     }
 }
 
@@ -220,6 +262,61 @@ test "Header: Simulate sending a dns query" {
     };
 
     try testing.expectEqualSlices(u8, &expected, &buffer);
+}
+
+test "Header: all fields with unique value" {
+    const original = Header{
+        .id = 0x1234,
+        .qr = 1,
+        .opcode = 10,
+        .aa = 1,
+        .tc = 0,
+        .rd = 1,
+        .ra = 0,
+        .z = 1,
+        .ad = 0,
+        .cd = 1,
+        .rcode = 5,
+        .qdcount = 3,
+        .ancount = 1,
+        .nscount = 2,
+        .arcount = 4,
+    };
+
+    var buffer: [12]u8 = undefined;
+    const len = original.encodeHeader(&buffer);
+    try testing.expectEqual(@as(usize, 12), len);
+
+    const decoded = Header.decodeHeader(&buffer);
+
+    try testing.expectEqualDeep(original, decoded);
+}
+
+test "Header: alternating flags" {
+    const original = Header{
+        .id = 0xBEEF,
+        .qr = 1,
+        .opcode = 9,
+        .aa = 1,
+        .tc = 0,
+        .rd = 1,
+        .ra = 0,
+        .z = 1,
+        .ad = 0,
+        .cd = 1,
+        .rcode = 3,
+        .qdcount = 0xFFFF,
+        .ancount = 0,
+        .nscount = 0x8000,
+        .arcount = 0x0001,
+    };
+
+    var buffer: [12]u8 = undefined;
+    _ = original.encodeHeader(&buffer);
+
+    const decoded = Header.decodeHeader(&buffer);
+
+    try testing.expectEqualDeep(original, decoded);
 }
 
 // Decode/Encode instances name
