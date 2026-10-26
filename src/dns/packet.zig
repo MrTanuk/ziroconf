@@ -91,6 +91,31 @@ pub const Question = struct {
     qname: []const []const u8,
     qtype: u16, // 1 for A, 12 for ptr, etc etc
     qclass: u16, // In
+
+    pub fn encodeQuestion(q: Question, out: []u8) !usize {
+        const offset = try encodeName(q.qname, out);
+        if (out.len < offset + 4) return error.NoSpace;
+
+        std.mem.writeInt(u16, out[offset..][0..2], q.qtype, .big);
+        std.mem.writeInt(u16, out[offset + 2 ..][0..2], q.qclass, .big);
+
+        return offset + 4;
+    }
+
+    pub fn decodeQuestion(buffer: []const u8, out: [][]const u8) !Question {
+        const data = try decodeName(buffer, out);
+
+        if (buffer.len < data.consumed + 4) return error.Truncated;
+
+        const qtype = std.mem.readInt(u16, buffer[data.consumed..][0..2], .big);
+        const qclass = std.mem.readInt(u16, buffer[data.consumed + 2 ..][0..2], .big);
+
+        return .{
+            .qname = out[0..data.count],
+            .qtype = qtype,
+            .qclass = qclass,
+        };
+    }
 };
 
 // For Answer, Authority, Additional
@@ -110,7 +135,7 @@ pub const Message = struct {
     additionals: []ResourceRecord,
 };
 
-pub fn encodeServiceInstanceName(labels: []const []const u8, out: []u8) !usize {
+pub fn encodeName(labels: []const []const u8, out: []u8) !usize {
     var seek: usize = 0;
 
     for (labels) |s| {
@@ -131,24 +156,23 @@ pub fn encodeServiceInstanceName(labels: []const []const u8, out: []u8) !usize {
     return seek;
 }
 
-pub fn decodeServiceInstanceName(in: []const u8, out: []u8) !usize {
+pub fn decodeName(name: []const u8, out: [][]const u8) !struct { consumed: usize, count: usize } {
     var s_pos: usize = 0;
-    var d_pos: usize = 0;
+    var i: usize = 0;
 
-    while (true) {
-        if (s_pos >= in.len) return error.Truncated;
-        const label_len: usize = in[s_pos];
+    while (true) : (i += 1) {
+        if (s_pos >= name.len) return error.Truncated;
+        const label_len: usize = name[s_pos];
 
-        if (label_len == 0) return s_pos + 1;
+        if (label_len == 0) break;
+        if (s_pos + 1 + label_len > name.len) return error.Truncated;
 
-        if (s_pos + 1 + label_len > in.len) return error.Truncated;
-        if (d_pos + label_len > out.len) return error.NoSpace;
-
-        @memcpy(out[d_pos .. d_pos + label_len], in[s_pos + 1 .. s_pos + 1 + label_len]);
-
-        d_pos += label_len;
+        if (i >= out.len) return error.NoSpace;
+        out[i] = name[s_pos + 1 .. s_pos + 1 + label_len];
         s_pos += 1 + label_len;
     }
+
+    return .{ .consumed = s_pos + 1, .count = i };
 }
 
 /// Print bits of six fields of header section
@@ -169,7 +193,6 @@ pub fn dumpHeader(buffer: *const [12]u8) void {
 
 // Tests
 
-// Header
 test "Header: all bits in 0" {
     const h = Header{
         .id = 0,
@@ -288,7 +311,6 @@ test "Header: all fields with unique value" {
     try testing.expectEqual(@as(usize, 12), len);
 
     const decoded = Header.decodeHeader(&buffer);
-
     try testing.expectEqualDeep(original, decoded);
 }
 
@@ -315,11 +337,11 @@ test "Header: alternating flags" {
     _ = original.encodeHeader(&buffer);
 
     const decoded = Header.decodeHeader(&buffer);
-
     try testing.expectEqualDeep(original, decoded);
 }
 
-// Decode/Encode instances name
+// Name tests
+
 const sample_labels = [_][]const u8{ "tanuko", "_chat", "_tcp", "local" };
 
 const sample_wire = [_]u8{
@@ -331,39 +353,117 @@ const sample_wire = [_]u8{
 
 const sample_flat = "tanuko_chat_tcplocal";
 
-test "encodeServiceInstanceName: 25 bytes of wire" {
+test "encodeName: 25 bytes of wire" {
     var out: [64]u8 = undefined;
 
-    const len = try encodeServiceInstanceName(&sample_labels, &out);
+    const len = try encodeName(&sample_labels, &out);
 
     try testing.expectEqual(@as(usize, sample_wire.len), len);
     try testing.expectEqualSlices(u8, &sample_wire, out[0..len]);
 }
 
-test "encodeServiceInstanceName: NoSpace" {
+test "encodeName: NoSpace" {
     var out: [3]u8 = undefined;
-    try testing.expectError(error.NoSpace, encodeServiceInstanceName(&sample_labels, &out));
+    try testing.expectError(error.NoSpace, encodeName(&sample_labels, &out));
 }
 
-test "decodeServiceInstanceName: Empty input" {
-    var out: [64]u8 = undefined;
-    try testing.expectError(error.Truncated, decodeServiceInstanceName(&[_]u8{}, &out));
+test "decodeName: Empty input" {
+    var out: [10][]const u8 = undefined;
+    try testing.expectError(error.Truncated, decodeName(&[_]u8{}, &out));
 }
 
-test "decodeServiceInstanceName: Truncated label" {
+test "decodeName: Truncated label" {
     const wire = [_]u8{ 3, 'a', 'b' };
-    var out: [64]u8 = undefined;
-    try testing.expectError(error.Truncated, decodeServiceInstanceName(&wire, &out));
+    var out: [10][]const u8 = undefined;
+    try testing.expectError(error.Truncated, decodeName(&wire, &out));
 }
 
-test "decodeServiceInstanceName: No terminator" {
+test "decodeName: No terminator" {
     const wire = [_]u8{ 3, 'a', 'b', 'c' };
-    var out: [64]u8 = undefined;
-    try testing.expectError(error.Truncated, decodeServiceInstanceName(&wire, &out));
+    var out: [10][]const u8 = undefined;
+    try testing.expectError(error.Truncated, decodeName(&wire, &out));
 }
 
-test "decodeServiceInstanceName: NoSpace" {
-    const wire = [_]u8{ 3, 'a', 'b', 'c', 0 };
-    var out: [2]u8 = undefined;
-    try testing.expectError(error.NoSpace, decodeServiceInstanceName(&wire, &out));
+test "decodeName: NoSpace" {
+    const wire = [_]u8{ 1, 'a', 1, 'b', 0 };
+    var out: [1][]const u8 = undefined;
+    try testing.expectError(error.NoSpace, decodeName(&wire, &out));
+}
+
+// Question tests
+
+test "Question: Encode" {
+    const q = Question{
+        .qname = &sample_labels,
+        .qtype = 1, // A
+        .qclass = 1, // IN
+    };
+
+    var buf: [256]u8 = undefined;
+    const len = try q.encodeQuestion(&buf);
+
+    const expected = sample_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
+
+    try testing.expectEqual(@as(usize, expected.len), len);
+    try testing.expectEqualSlices(u8, &expected, buf[0..len]);
+}
+
+test "Question: Decode" {
+    const wire = sample_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
+
+    var slices: [16][]const u8 = undefined;
+    const q = try Question.decodeQuestion(&wire, &slices);
+
+    try testing.expectEqual(@as(usize, 4), q.qname.len);
+    try testing.expectEqualStrings("tanuko", q.qname[0]);
+    try testing.expectEqualStrings("_chat", q.qname[1]);
+    try testing.expectEqualStrings("_tcp", q.qname[2]);
+    try testing.expectEqualStrings("local", q.qname[3]);
+    try testing.expectEqual(@as(u16, 1), q.qtype);
+    try testing.expectEqual(@as(u16, 1), q.qclass);
+}
+
+test "Question: round-trip" {
+    const original = Question{
+        .qname = &sample_labels,
+        .qtype = 12, // PTR
+        .qclass = 1,
+    };
+
+    var buf: [256]u8 = undefined;
+    const written = try original.encodeQuestion(&buf);
+
+    var slices: [16][]const u8 = undefined;
+    const decoded = try Question.decodeQuestion(buf[0..written], &slices);
+
+    try testing.expectEqual(original.qtype, decoded.qtype);
+    try testing.expectEqual(original.qclass, decoded.qclass);
+    try testing.expectEqual(original.qname.len, decoded.qname.len);
+    for (original.qname, decoded.qname) |a, b| {
+        try testing.expectEqualStrings(a, b);
+    }
+}
+
+test "Question: decode — truncated qtype" {
+    const wire = sample_wire ++ [1]u8{0x00};
+
+    var slices: [16][]const u8 = undefined;
+    try testing.expectError(error.Truncated, Question.decodeQuestion(&wire, &slices));
+}
+
+test "Question: decode — truncated qclass" {
+    const wire = sample_wire ++ [3]u8{ 0x00, 0x01, 0x00 };
+
+    var slices: [16][]const u8 = undefined;
+    try testing.expectError(error.Truncated, Question.decodeQuestion(&wire, &slices));
+}
+
+test "Question: encode — NoSpace" {
+    const q = Question{
+        .qname = &sample_labels,
+        .qtype = 1,
+        .qclass = 1,
+    };
+    var buf: [28]u8 = undefined;
+    try testing.expectError(error.NoSpace, q.encodeQuestion(&buf));
 }
