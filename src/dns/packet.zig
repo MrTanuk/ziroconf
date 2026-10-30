@@ -102,7 +102,7 @@ pub const Question = struct {
         return offset + 4;
     }
 
-    pub fn decodeQuestion(buffer: []const u8, out: [][]const u8) !Question {
+    pub fn decodeQuestion(buffer: []const u8, out: [][]const u8) !struct { question: Question, consumed: usize } {
         const data = try decodeName(buffer, out);
 
         if (buffer.len < data.consumed + 4) return error.Truncated;
@@ -111,9 +111,12 @@ pub const Question = struct {
         const qclass = std.mem.readInt(u16, buffer[data.consumed + 2 ..][0..2], .big);
 
         return .{
-            .qname = out[0..data.count],
-            .qtype = qtype,
-            .qclass = qclass,
+            .question = .{
+                .qname = out[0..data.count],
+                .qtype = qtype,
+                .qclass = qclass,
+            },
+            .consumed = data.consumed + 4,
         };
     }
 };
@@ -412,7 +415,8 @@ test "Question: Decode" {
     const wire = sample_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
 
     var slices: [16][]const u8 = undefined;
-    const q = try Question.decodeQuestion(&wire, &slices);
+    const data_question = try Question.decodeQuestion(&wire, &slices);
+    const q = data_question.question;
 
     try testing.expectEqual(@as(usize, 4), q.qname.len);
     try testing.expectEqualStrings("tanuko", q.qname[0]);
@@ -434,7 +438,8 @@ test "Question: round-trip" {
     const written = try original.encodeQuestion(&buf);
 
     var slices: [16][]const u8 = undefined;
-    const decoded = try Question.decodeQuestion(buf[0..written], &slices);
+    const data_question = try Question.decodeQuestion(buf[0..written], &slices);
+    const decoded = data_question.question;
 
     try testing.expectEqual(original.qtype, decoded.qtype);
     try testing.expectEqual(original.qclass, decoded.qclass);
@@ -442,6 +447,8 @@ test "Question: round-trip" {
     for (original.qname, decoded.qname) |a, b| {
         try testing.expectEqualStrings(a, b);
     }
+
+    try testing.expectEqual(written, data_question.consumed);
 }
 
 test "Question: decode — truncated qtype" {
