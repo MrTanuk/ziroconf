@@ -19,28 +19,28 @@ pub const Header = struct {
     nscount: u16,
     arcount: u16,
 
-    pub fn encodeHeader(h: Header, buffer_header: *[12]u8) usize {
-        std.mem.writeInt(u16, buffer_header[0..2], h.id, .big);
+    pub fn encodeHeader(self: Header, out: *[12]u8) usize {
+        std.mem.writeInt(u16, out[0..2], self.id, .big);
 
         var flags: u16 = 0;
 
-        const arr_flags = [7]u1{ h.aa, h.tc, h.rd, h.ra, h.z, h.ad, h.cd };
+        const arr_flags = [7]u1{ self.aa, self.tc, self.rd, self.ra, self.z, self.ad, self.cd };
         const bit_pos = [7]u4{ 10, 9, 8, 7, 6, 5, 4 };
 
-        flags |= @as(u16, @intCast(h.qr)) << 15;
-        flags |= @as(u16, @intCast(h.opcode)) << 11;
+        flags |= @as(u16, @intCast(self.qr)) << 15;
+        flags |= @as(u16, @intCast(self.opcode)) << 11;
 
         for (arr_flags, bit_pos) |flag, pos| {
             flags |= @as(u16, @intCast(flag)) << pos;
         }
 
-        flags |= @as(u16, @intCast(h.rcode)) << 0;
+        flags |= @as(u16, @intCast(self.rcode)) << 0;
 
-        std.mem.writeInt(u16, buffer_header[2..4], flags, .big);
-        std.mem.writeInt(u16, buffer_header[4..6], h.qdcount, .big);
-        std.mem.writeInt(u16, buffer_header[6..8], h.ancount, .big);
-        std.mem.writeInt(u16, buffer_header[8..10], h.nscount, .big);
-        std.mem.writeInt(u16, buffer_header[10..12], h.arcount, .big);
+        std.mem.writeInt(u16, out[2..4], flags, .big);
+        std.mem.writeInt(u16, out[4..6], self.qdcount, .big);
+        std.mem.writeInt(u16, out[6..8], self.ancount, .big);
+        std.mem.writeInt(u16, out[8..10], self.nscount, .big);
+        std.mem.writeInt(u16, out[10..12], self.arcount, .big);
 
         return 12;
     }
@@ -92,18 +92,20 @@ pub const Question = struct {
     qtype: u16, // 1 for A, 12 for ptr, etc etc
     qclass: u16, // In
 
-    pub fn encodeQuestion(q: Question, out: []u8) !usize {
-        const offset = try encodeName(q.qname, out);
-        if (out.len < offset + 4) return error.NoSpace;
+    pub const DecodedQuestion = struct { value: Question, consumed: usize };
 
-        std.mem.writeInt(u16, out[offset..][0..2], q.qtype, .big);
-        std.mem.writeInt(u16, out[offset + 2 ..][0..2], q.qclass, .big);
+    pub fn encodeQuestion(self: Question, wire: []u8) !usize {
+        const offset = try encodeName(self.qname, wire);
+        if (wire.len < offset + 4) return error.NoSpace;
+
+        std.mem.writeInt(u16, wire[offset..][0..2], self.qtype, .big);
+        std.mem.writeInt(u16, wire[offset + 2 ..][0..2], self.qclass, .big);
 
         return offset + 4;
     }
 
-    pub fn decodeQuestion(buffer: []const u8, out: [][]const u8) !struct { question: Question, consumed: usize } {
-        const data = try decodeName(buffer, out);
+    pub fn decodeQuestion(buffer: []const u8, slices: [][]const u8) !DecodedQuestion {
+        const data = try decodeName(buffer, slices);
 
         if (buffer.len < data.consumed + 4) return error.Truncated;
 
@@ -111,8 +113,8 @@ pub const Question = struct {
         const qclass = std.mem.readInt(u16, buffer[data.consumed + 2 ..][0..2], .big);
 
         return .{
-            .question = .{
-                .qname = out[0..data.count],
+            .value = .{
+                .qname = slices[0..data.label_count],
                 .qtype = qtype,
                 .qclass = qclass,
             },
@@ -129,25 +131,27 @@ pub const ResourceRecord = struct {
     ttl: u32,
     rdata: []const u8,
 
-    pub fn encodeResourceRecord(record: ResourceRecord, out: []u8) !usize {
-        if (record.rdata.len > 0xFFFF) return error.RdataTooLong;
-        const rdata_len = @as(u16, @intCast(record.rdata.len));
+    pub const DecodedRecord = struct { value: ResourceRecord, consumed: usize };
 
-        const offset = try encodeName(record.name, out);
-        if (out.len < offset + 10 + record.rdata.len) return error.NoSpace;
+    pub fn encodeResourceRecord(self: ResourceRecord, wire: []u8) !usize {
+        if (self.rdata.len > 0xFFFF) return error.RdataTooLong;
+        const rdlength = @as(u16, @intCast(self.rdata.len));
 
-        std.mem.writeInt(u16, out[offset..][0..2], record.rtype, .big);
-        std.mem.writeInt(u16, out[offset + 2 ..][0..2], record.rclass, .big);
-        std.mem.writeInt(u32, out[offset + 4 ..][0..4], record.ttl, .big);
-        std.mem.writeInt(u16, out[offset + 8 ..][0..2], rdata_len, .big);
+        const offset = try encodeName(self.name, wire);
+        if (wire.len < offset + 10 + self.rdata.len) return error.NoSpace;
 
-        @memcpy(out[offset + 10 ..][0..rdata_len], record.rdata);
+        std.mem.writeInt(u16, wire[offset..][0..2], self.rtype, .big);
+        std.mem.writeInt(u16, wire[offset + 2 ..][0..2], self.rclass, .big);
+        std.mem.writeInt(u32, wire[offset + 4 ..][0..4], self.ttl, .big);
+        std.mem.writeInt(u16, wire[offset + 8 ..][0..2], rdlength, .big);
 
-        return offset + 10 + rdata_len;
+        @memcpy(wire[offset + 10 ..][0..rdlength], self.rdata);
+
+        return offset + 10 + rdlength;
     }
 
-    pub fn decodeResourceRecord(buffer: []const u8, out: [][]const u8) !struct { record: ResourceRecord, consumed: usize } {
-        const data = try decodeName(buffer, out);
+    pub fn decodeResourceRecord(buffer: []const u8, slices: [][]const u8) !DecodedRecord {
+        const data = try decodeName(buffer, slices);
 
         if (buffer.len < data.consumed + 10) return error.Truncated;
 
@@ -161,8 +165,8 @@ pub const ResourceRecord = struct {
         const rdata = buffer[data.consumed + 10 ..][0..rdlength];
 
         return .{
-            .record = .{
-                .name = out[0..data.count],
+            .value = .{
+                .name = slices[0..data.label_count],
                 .rtype = rtype,
                 .rclass = rclass,
                 .ttl = ttl,
@@ -181,44 +185,44 @@ pub const Message = struct {
     additionals: []ResourceRecord,
 };
 
-pub fn encodeName(labels: []const []const u8, out: []u8) !usize {
+pub fn encodeName(labels: []const []const u8, wire: []u8) !usize {
     var seek: usize = 0;
 
     for (labels) |s| {
         if (s.len > 63) return error.LabelTooLong;
-        if (seek + 1 + s.len > out.len) return error.NoSpace;
+        if (seek + 1 + s.len > wire.len) return error.NoSpace;
 
-        out[seek] = @intCast(s.len);
+        wire[seek] = @intCast(s.len);
         seek += 1;
 
-        @memcpy(out[seek .. seek + s.len], s);
+        @memcpy(wire[seek .. seek + s.len], s);
         seek += s.len;
     }
 
-    if (seek + 1 > out.len) return error.NoSpace;
-    out[seek] = 0x00;
+    if (seek + 1 > wire.len) return error.NoSpace;
+    wire[seek] = 0x00;
     seek += 1;
 
     return seek;
 }
 
-pub fn decodeName(name: []const u8, out: [][]const u8) !struct { consumed: usize, count: usize } {
+pub fn decodeName(wire: []const u8, slices: [][]const u8) !struct { consumed: usize, label_count: usize } {
     var s_pos: usize = 0;
     var i: usize = 0;
 
     while (true) : (i += 1) {
-        if (s_pos >= name.len) return error.Truncated;
-        const label_len: usize = name[s_pos];
+        if (s_pos >= wire.len) return error.Truncated;
+        const label_len: usize = wire[s_pos];
 
         if (label_len == 0) break;
-        if (s_pos + 1 + label_len > name.len) return error.Truncated;
+        if (s_pos + 1 + label_len > wire.len) return error.Truncated;
 
-        if (i >= out.len) return error.NoSpace;
-        out[i] = name[s_pos + 1 .. s_pos + 1 + label_len];
+        if (i >= slices.len) return error.NoSpace;
+        slices[i] = wire[s_pos + 1 .. s_pos + 1 + label_len];
         s_pos += 1 + label_len;
     }
 
-    return .{ .consumed = s_pos + 1, .count = i };
+    return .{ .consumed = s_pos + 1, .label_count = i };
 }
 
 /// Print bits of six fields of header section
@@ -390,22 +394,20 @@ test "Header: alternating flags" {
 
 const sample_labels = [_][]const u8{ "tanuko", "_chat", "_tcp", "local" };
 
-const sample_wire = [_]u8{
+const sample_name_wire = [_]u8{
     6,   't', 'a', 'n', 'u', 'k', 'o',
     5,   '_', 'c', 'h', 'a', 't', 4,
     '_', 't', 'c', 'p', 5,   'l', 'o',
     'c', 'a', 'l', 0,
 };
 
-const sample_flat = "tanuko_chat_tcplocal";
-
 test "encodeName: 25 bytes of wire" {
     var out: [64]u8 = undefined;
 
     const len = try encodeName(&sample_labels, &out);
 
-    try testing.expectEqual(@as(usize, sample_wire.len), len);
-    try testing.expectEqualSlices(u8, &sample_wire, out[0..len]);
+    try testing.expectEqual(@as(usize, sample_name_wire.len), len);
+    try testing.expectEqualSlices(u8, &sample_name_wire, out[0..len]);
 }
 
 test "encodeName: NoSpace" {
@@ -448,18 +450,18 @@ test "Question: Encode" {
     var buf: [256]u8 = undefined;
     const len = try q.encodeQuestion(&buf);
 
-    const expected = sample_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
+    const expected = sample_name_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
 
     try testing.expectEqual(@as(usize, expected.len), len);
     try testing.expectEqualSlices(u8, &expected, buf[0..len]);
 }
 
 test "Question: Decode" {
-    const wire = sample_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
+    const wire = sample_name_wire ++ [4]u8{ 0x00, 0x01, 0x00, 0x01 };
 
     var slices: [16][]const u8 = undefined;
     const data_question = try Question.decodeQuestion(&wire, &slices);
-    const q = data_question.question;
+    const q = data_question.value;
 
     try testing.expectEqual(@as(usize, 4), q.qname.len);
     try testing.expectEqualStrings("tanuko", q.qname[0]);
@@ -482,7 +484,7 @@ test "Question: round-trip" {
 
     var slices: [16][]const u8 = undefined;
     const data_question = try Question.decodeQuestion(buf[0..written], &slices);
-    const decoded = data_question.question;
+    const decoded = data_question.value;
 
     try testing.expectEqual(original.qtype, decoded.qtype);
     try testing.expectEqual(original.qclass, decoded.qclass);
@@ -495,14 +497,14 @@ test "Question: round-trip" {
 }
 
 test "Question: decode — truncated qtype" {
-    const wire = sample_wire ++ [1]u8{0x00};
+    const wire = sample_name_wire ++ [1]u8{0x00};
 
     var slices: [16][]const u8 = undefined;
     try testing.expectError(error.Truncated, Question.decodeQuestion(&wire, &slices));
 }
 
 test "Question: decode — truncated qclass" {
-    const wire = sample_wire ++ [3]u8{ 0x00, 0x01, 0x00 };
+    const wire = sample_name_wire ++ [3]u8{ 0x00, 0x01, 0x00 };
 
     var slices: [16][]const u8 = undefined;
     try testing.expectError(error.Truncated, Question.decodeQuestion(&wire, &slices));
@@ -523,21 +525,21 @@ const sample_rdata = [_]u8{ 192, 168, 1, 1 }; // A record: 192.168.1.1
 
 test "ResourceRecord: golden — encode" {
     const rr = ResourceRecord{
-        .name   = &sample_labels,
-        .rtype  = 1,         // A
-        .rclass = 1,         // IN
-        .ttl    = 0x12345678,
-        .rdata  = &sample_rdata,
+        .name = &sample_labels,
+        .rtype = 1, // A
+        .rclass = 1, // IN
+        .ttl = 0x12345678,
+        .rdata = &sample_rdata,
     };
 
     var buf: [256]u8 = undefined;
     const written = try rr.encodeResourceRecord(&buf);
 
-    const expected = sample_wire ++ [14]u8{
-        0x00, 0x01,             // rtype  = 1 (A)
-        0x00, 0x01,             // rclass = 1 (IN)
+    const expected = sample_name_wire ++ [14]u8{
+        0x00, 0x01, // rtype  = 1 (A)
+        0x00, 0x01, // rclass = 1 (IN)
         0x12, 0x34, 0x56, 0x78, // ttl    = 0x12345678 (big-endian)
-        0x00, 0x04,             // rdlength = 4 (rdata.len)
+        0x00, 0x04, // rdlength = 4 (rdata.len)
         0xC0, 0xA8, 0x01, 0x01, // rdata: 192.168.1.1
     };
 
@@ -546,23 +548,25 @@ test "ResourceRecord: golden — encode" {
 }
 
 test "ResourceRecord: golden — decode" {
-    const wire = sample_wire ++ [14]u8{
+    const wire = sample_name_wire ++ [14]u8{
         0x00, 0x01,
         0x00, 0x01,
-        0x12, 0x34, 0x56, 0x78,
+        0x12, 0x34,
+        0x56, 0x78,
         0x00, 0x04,
-        0xC0, 0xA8, 0x01, 0x01,
+        0xC0, 0xA8,
+        0x01, 0x01,
     };
 
     var slices: [16][]const u8 = undefined;
     const data_rr = try ResourceRecord.decodeResourceRecord(&wire, &slices);
-    const rr = data_rr.record;
+    const rr = data_rr.value;
 
     try testing.expectEqual(@as(usize, 4), rr.name.len);
     try testing.expectEqualStrings("tanuko", rr.name[0]);
-    try testing.expectEqualStrings("_chat",  rr.name[1]);
-    try testing.expectEqualStrings("_tcp",   rr.name[2]);
-    try testing.expectEqualStrings("local",  rr.name[3]);
+    try testing.expectEqualStrings("_chat", rr.name[1]);
+    try testing.expectEqualStrings("_tcp", rr.name[2]);
+    try testing.expectEqualStrings("local", rr.name[3]);
     try testing.expectEqual(@as(u16, 1), rr.rtype);
     try testing.expectEqual(@as(u16, 1), rr.rclass);
     try testing.expectEqual(@as(u32, 0x12345678), rr.ttl);
@@ -572,11 +576,11 @@ test "ResourceRecord: golden — decode" {
 
 test "ResourceRecord: round-trip" {
     const original = ResourceRecord{
-        .name   = &sample_labels,
-        .rtype  = 1,
+        .name = &sample_labels,
+        .rtype = 1,
         .rclass = 1,
-        .ttl    = 0x12345678,
-        .rdata  = &sample_rdata,
+        .ttl = 0x12345678,
+        .rdata = &sample_rdata,
     };
 
     var buf: [256]u8 = undefined;
@@ -584,16 +588,15 @@ test "ResourceRecord: round-trip" {
 
     var slices: [16][]const u8 = undefined;
     const data_rr = try ResourceRecord.decodeResourceRecord(buf[0..written], &slices);
-    const decoded = data_rr.record;
+    const decoded = data_rr.value;
 
     try testing.expectEqual(original.name.len, decoded.name.len);
     for (original.name, decoded.name) |a, b| {
         try testing.expectEqualStrings(a, b);
     }
-    try testing.expectEqual(original.rtype,  decoded.rtype);
+    try testing.expectEqual(original.rtype, decoded.rtype);
     try testing.expectEqual(original.rclass, decoded.rclass);
-    try testing.expectEqual(original.ttl,    decoded.ttl);
+    try testing.expectEqual(original.ttl, decoded.ttl);
     try testing.expectEqualSlices(u8, original.rdata, decoded.rdata);
     try testing.expectEqual(written, data_rr.consumed);
 }
-
