@@ -128,6 +128,49 @@ pub const ResourceRecord = struct {
     rclass: u16,
     ttl: u32,
     rdata: []const u8,
+
+    pub fn encodeResourceRecord(record: ResourceRecord, out: []u8) !usize {
+        if (record.rdata.len > 0xFFFF) return error.RdataTooLong;
+        const rdata_len = @as(u16, @intCast(record.rdata.len));
+
+        const offset = try encodeName(record.name, out);
+        if (out.len < offset + 10 + record.rdata.len) return error.NoSpace;
+
+        std.mem.writeInt(u16, out[offset..][0..2], record.rtype, .big);
+        std.mem.writeInt(u16, out[offset + 2 ..][0..2], record.rclass, .big);
+        std.mem.writeInt(u32, out[offset + 4 ..][0..4], record.ttl, .big);
+        std.mem.writeInt(u16, out[offset + 8 ..][0..2], rdata_len, .big);
+
+        @memcpy(out[offset + 10 ..][0..rdata_len], record.rdata);
+
+        return offset + 10 + rdata_len;
+    }
+
+    pub fn decodeResourceRecord(buffer: []const u8, out: [][]const u8) !struct { record: ResourceRecord, consumed: usize } {
+        const data = try decodeName(buffer, out);
+
+        if (buffer.len < data.consumed + 10) return error.Truncated;
+
+        const rtype = std.mem.readInt(u16, buffer[data.consumed..][0..2], .big);
+        const rclass = std.mem.readInt(u16, buffer[data.consumed + 2 ..][0..2], .big);
+        const ttl = std.mem.readInt(u32, buffer[data.consumed + 4 ..][0..4], .big);
+        const rdlength = std.mem.readInt(u16, buffer[data.consumed + 8 ..][0..2], .big);
+
+        if (buffer.len < data.consumed + 10 + rdlength) return error.Truncated;
+
+        const rdata = buffer[data.consumed + 10 ..][0..rdlength];
+
+        return .{
+            .record = .{
+                .name = out[0..data.count],
+                .rtype = rtype,
+                .rclass = rclass,
+                .ttl = ttl,
+                .rdata = rdata,
+            },
+            .consumed = data.consumed + 10 + rdlength,
+        };
+    }
 };
 
 pub const Message = struct {
@@ -474,3 +517,83 @@ test "Question: encode — NoSpace" {
     var buf: [28]u8 = undefined;
     try testing.expectError(error.NoSpace, q.encodeQuestion(&buf));
 }
+
+// ResourceRecord tests
+const sample_rdata = [_]u8{ 192, 168, 1, 1 }; // A record: 192.168.1.1
+
+test "ResourceRecord: golden — encode" {
+    const rr = ResourceRecord{
+        .name   = &sample_labels,
+        .rtype  = 1,         // A
+        .rclass = 1,         // IN
+        .ttl    = 0x12345678,
+        .rdata  = &sample_rdata,
+    };
+
+    var buf: [256]u8 = undefined;
+    const written = try rr.encodeResourceRecord(&buf);
+
+    const expected = sample_wire ++ [14]u8{
+        0x00, 0x01,             // rtype  = 1 (A)
+        0x00, 0x01,             // rclass = 1 (IN)
+        0x12, 0x34, 0x56, 0x78, // ttl    = 0x12345678 (big-endian)
+        0x00, 0x04,             // rdlength = 4 (rdata.len)
+        0xC0, 0xA8, 0x01, 0x01, // rdata: 192.168.1.1
+    };
+
+    try testing.expectEqual(@as(usize, expected.len), written);
+    try testing.expectEqualSlices(u8, &expected, buf[0..written]);
+}
+
+test "ResourceRecord: golden — decode" {
+    const wire = sample_wire ++ [14]u8{
+        0x00, 0x01,
+        0x00, 0x01,
+        0x12, 0x34, 0x56, 0x78,
+        0x00, 0x04,
+        0xC0, 0xA8, 0x01, 0x01,
+    };
+
+    var slices: [16][]const u8 = undefined;
+    const data_rr = try ResourceRecord.decodeResourceRecord(&wire, &slices);
+    const rr = data_rr.record;
+
+    try testing.expectEqual(@as(usize, 4), rr.name.len);
+    try testing.expectEqualStrings("tanuko", rr.name[0]);
+    try testing.expectEqualStrings("_chat",  rr.name[1]);
+    try testing.expectEqualStrings("_tcp",   rr.name[2]);
+    try testing.expectEqualStrings("local",  rr.name[3]);
+    try testing.expectEqual(@as(u16, 1), rr.rtype);
+    try testing.expectEqual(@as(u16, 1), rr.rclass);
+    try testing.expectEqual(@as(u32, 0x12345678), rr.ttl);
+    try testing.expectEqualSlices(u8, &sample_rdata, rr.rdata);
+    try testing.expectEqual(@as(usize, wire.len), data_rr.consumed);
+}
+
+test "ResourceRecord: round-trip" {
+    const original = ResourceRecord{
+        .name   = &sample_labels,
+        .rtype  = 1,
+        .rclass = 1,
+        .ttl    = 0x12345678,
+        .rdata  = &sample_rdata,
+    };
+
+    var buf: [256]u8 = undefined;
+    const written = try original.encodeResourceRecord(&buf);
+
+    var slices: [16][]const u8 = undefined;
+    const data_rr = try ResourceRecord.decodeResourceRecord(buf[0..written], &slices);
+    const decoded = data_rr.record;
+
+    try testing.expectEqual(original.name.len, decoded.name.len);
+    for (original.name, decoded.name) |a, b| {
+        try testing.expectEqualStrings(a, b);
+    }
+    try testing.expectEqual(original.rtype,  decoded.rtype);
+    try testing.expectEqual(original.rclass, decoded.rclass);
+    try testing.expectEqual(original.ttl,    decoded.ttl);
+    try testing.expectEqualSlices(u8, original.rdata, decoded.rdata);
+    try testing.expectEqual(written, data_rr.consumed);
+}
+
