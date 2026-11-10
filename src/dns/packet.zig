@@ -287,10 +287,14 @@ pub const Message = struct {
 
 pub fn encodeName(labels: []const []const u8, wire: []u8) !usize {
     var seek: usize = 0;
+    var total_length: usize = 0;
 
     for (labels) |s| {
         if (s.len > 63) return error.LabelTooLong;
         if (seek + 1 + s.len > wire.len) return error.NoSpace;
+
+        total_length += s.len + 1;
+        if (total_length + 1 > 255) return error.MaxLengthName;
 
         wire[seek] = @intCast(s.len);
         seek += 1;
@@ -316,6 +320,7 @@ pub fn decodeName(wire: []const u8, slices: [][]const u8) !struct { consumed: us
 
         if (label_len == 0) break;
         if (s_pos + 1 + label_len > wire.len) return error.Truncated;
+        if (s_pos + 1 + label_len + 1 > 255) return error.MaxLengthName;
 
         if (i >= slices.len) return error.NoSpace;
         slices[i] = wire[s_pos + 1 .. s_pos + 1 + label_len];
